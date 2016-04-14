@@ -1,14 +1,29 @@
-#include <ADC.h>  // for Teensy 3.1: get it from http://github.com/pedvide/ADC
+#include <ADC.h>
 #include <MozziGuts.h>
-#include <Oscil.h> // oscillator template
-#include <tables/sin2048_int8.h> // sine table for oscillator
+#include <Oscil.h>
+#include <tables/cos2048_int8.h> // table for Oscils to play
+#include <mozzi_fixmath.h>
+#include <EventDelay.h>
+#include <mozzi_rand.h>
+#include <mozzi_midi.h>
 
-// use: Oscil <table_size, update_rate> oscilName (wavetable)
-// look in .h file of table #included above
-Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> aSin(SIN2048_DATA);
 
-// use #define for CONTROL_RATE, not a constant
-#define CONTROL_RATE 64 // powers of 2 please
+// audio oscils
+Oscil<COS2048_NUM_CELLS, AUDIO_RATE> aCarrier(COS2048_DATA);
+Oscil<COS2048_NUM_CELLS, AUDIO_RATE> aModulator(COS2048_DATA);
+Oscil<COS2048_NUM_CELLS, AUDIO_RATE> aModDepth(COS2048_DATA);
+
+// for scheduling note changes in updateControl()
+EventDelay  kNoteChangeDelay;
+
+// synthesis parameters in fixed point formats
+Q8n8 ratio; // unsigned int with 8 integer bits and 8 fractional bits
+Q24n8 carrier_freq; // unsigned long with 24 integer bits and 8 fractional bits
+Q24n8 mod_freq; // unsigned long with 24 integer bits and 8 fractional bits
+
+// for random notes
+Q8n0 octave_start_note = 42;
+
 
 ///////////////////////////////////////////////////////////////////////////////
 const int trigPin = 22;
@@ -20,51 +35,90 @@ typedef enum state {
 } state_t;
 state_t sonarState = ready;
 
-#define DEBUG_PRINT true
+#define DEBUG_PRINT 0 // 1 is normal, 2 is verbose
 ///////////////////////////////////////////////////////////////////////////////
 
-void setup(){
-    Serial.begin(9600);         // 9600 is strongly recommended with Mozzi
-    startMozzi(CONTROL_RATE);   // set a control rate of 64 (powers of 2 please)
 
+void setup() {
+#if DEBUG_PRINT > 0
+    Serial.begin(9600);         // 9600 is strongly recommended with Teensy & Mozzi
+#endif
     pinMode(echoPin, INPUT);
     pinMode(trigPin, OUTPUT);
     digitalWrite(trigPin, LOW);
+
+    ratio = float_to_Q8n8(9.0f);   // define modulation ratio in float and convert to fixed-point
+    randSeed(); // reseed the random generator for different results each time the sketch runs
+    startMozzi(); // use default CONTROL_RATE 64
 }
 
 
-void updateControl(){ // runs @ 64 Hz // every 15ms
-    const float smoothCoef = 0.85;
-    static float smoothedFreq = 0;
-    const float minFreq = 100.0;
-    const float maxFreq = 6000.0;
+inline float distMap(float near, float far) {
+    return map(distance, 0.0, maxDistance, near, far);
+}
 
-    if (distance) {
-        float freq = map(distance, 0.0, maxDistance, minFreq, maxFreq);
-        smoothedFreq = (smoothCoef) * smoothedFreq + (1-smoothCoef) * freq;
-        aSin.setFreq(smoothedFreq); // set the frequency
-#if DEBUG_PRINT
-        Serial.print(smoothedFreq);
-        Serial.print(" ");
-        Serial.print(minFreq);
-        Serial.print(" ");
-        Serial.print(maxFreq);
-        Serial.print(" ");
-        Serial.println(freq);
+
+void updateControl() {
+#if DEBUG_PRINT > 0
+    static int distOld = 0;
+    if (distOld != int(distance)) {
+        Serial.println(int(distance));
+        distOld = int(distance);
+    }
 #endif
+
+    kNoteChangeDelay.set(distMap(70, 150));   // note duration ms, within resolution of CONTROL_RATE
+    aModDepth.setFreq(distMap(33, 0.3));      // vary mod depth to highlight am effects
+
+    //////////////////////////////////////////////////////////////////////
+
+    static Q16n16 last_note = octave_start_note;
+
+    if (kNoteChangeDelay.ready()) {
+
+        last_note = distMap(126, 3); // TODO Tune
+
+        // change step up or down a semitone occasionally
+        if (rand((byte)3) == 0) {
+            last_note += 1 - rand((byte)2);
+        }
+
+        // change modulation ratio
+        ratio = ((Q8n8) 1 + rand((byte)9)) << 8;
+
+        // sometimes add a fraction to the ratio
+        if (rand((byte)5) == 0) {
+            ratio += rand((byte)255);
+        }
+
+        // convert midi to frequency
+        Q16n16 midi_note = Q8n0_to_Q16n16(last_note);
+        carrier_freq = Q16n16_to_Q24n8(Q16n16_mtof(midi_note));
+
+        // calculate modulation frequency to stay in ratio with carrier
+        mod_freq = (carrier_freq * ratio) >> 8; // (Q24n8   Q8n8) >> 8 = Q24n8
+
+        // set frequencies of the oscillators
+        aCarrier.setFreq_Q24n8(carrier_freq);
+        aModulator.setFreq_Q24n8(mod_freq);
+
+        // reset the note scheduler
+        kNoteChangeDelay.start();
     }
 }
 
 
-int updateAudio(){ // runs @ 16 KHz // every ~60us
+int updateAudio() {
     nonBlockingPing();
 
-    return aSin.next(); // return an int signal centred around 0
+    unsigned int mod = (128u + aModulator.next()) * ((byte)128 + aModDepth.next());
+    int out = ((long)mod * aCarrier.next()) >> 10; // 16 bit   8 bit = 24 bit, then >>10 = 14 bit
+    return out;
 }
 
 
-void loop(){
-    audioHook(); // required here
+void loop() {
+    audioHook();
 }
 
 
@@ -92,6 +146,15 @@ inline void nonBlockingPing(void) {
     static long trigTime = 0; // us
     long elapsed = mozziMicros() - trigTime;
 
+#if DEBUG_PRINT > 1
+    static int oldState = 0;
+    if (oldState != sonarState) {
+        Serial.print("\t");
+        Serial.println(sonarState);
+        oldState  = distance;
+    }
+#endif
+
     switch (sonarState) {
         case ready : // start triggering a pulse
             {
@@ -115,6 +178,12 @@ inline void nonBlockingPing(void) {
                     trigTime = mozziMicros();
                     sonarState = waitForEchoEnd;
                 }
+
+                // did a time-out occur ?
+                if (elapsed > cm2us(maxDistance)) {
+                    // distance = 0;
+                    sonarState = ready;
+                }
             }
             break;
 
@@ -127,16 +196,16 @@ inline void nonBlockingPing(void) {
 
                 // did a time-out occur ?
                 if (elapsed > cm2us(maxDistance)) {
-                    distance = 0;
+                    // distance = 0;
                     sonarState = ready;
                 }
 
             }
             break;
 
-        case waitForNewPulse : // wait 10ms before new pulse
+        case waitForNewPulse : // wait before new pulse
             {
-                if (elapsed > 10000) { // TODO: find minimum possible
+                if (elapsed > 30000) { // TODO: find minimum possible
                     sonarState = ready;
                 }
             }
