@@ -10,17 +10,17 @@ Oscil <SIN2048_NUM_CELLS, AUDIO_RATE> aSin(SIN2048_DATA);
 // use #define for CONTROL_RATE, not a constant
 #define CONTROL_RATE 64 // powers of 2 please
 
-int freq = 440;
-
 ///////////////////////////////////////////////////////////////////////////////
 const int trigPin = 22;
 const int echoPin = 23;
-const int maxDistance = 150; // cm
-int distance = 0;            // cm
-typedef enum state {ready, pulseStarted, pulseSent, waitForEchoEnd, wait_30ms} state_t;
+const int maxDistance = 100.0; // cm
+float distance = 0.0;          // cm
+typedef enum state {
+    ready, pulseStarted, pulseSent, waitForEchoEnd, waitForNewPulse
+} state_t;
 state_t sonarState = ready;
 
-
+#define DEBUG_PRINT true
 ///////////////////////////////////////////////////////////////////////////////
 
 void setup(){
@@ -34,9 +34,24 @@ void setup(){
 
 
 void updateControl(){ // runs @ 64 Hz // every 15ms
+    const float smoothCoef = 0.85;
+    static float smoothedFreq = 0;
+    const float minFreq = 100.0;
+    const float maxFreq = 6000.0;
+
     if (distance) {
-        freq = map(distance, 0, maxDistance, 150, 15000);
-        aSin.setFreq(freq); // set the frequency
+        float freq = map(distance, 0.0, maxDistance, minFreq, maxFreq);
+        smoothedFreq = (smoothCoef) * smoothedFreq + (1-smoothCoef) * freq;
+        aSin.setFreq(smoothedFreq); // set the frequency
+#if DEBUG_PRINT
+        Serial.print(smoothedFreq);
+        Serial.print(" ");
+        Serial.print(minFreq);
+        Serial.print(" ");
+        Serial.print(maxFreq);
+        Serial.print(" ");
+        Serial.println(freq);
+#endif
     }
 }
 
@@ -107,24 +122,21 @@ inline void nonBlockingPing(void) {
             {
                 if (0 == digitalRead(echoPin)) {
                     distance = us2cm(elapsed);
-
-                    Serial.println(distance);       // TODO REMOVE !!!
-
-                    sonarState = wait_30ms;
+                    sonarState = waitForNewPulse;
                 }
 
                 // did a time-out occur ?
                 if (elapsed > cm2us(maxDistance)) {
-                    distance = 0; // timeout
-                    sonarState = ready;             // TODO : wait 30ms ?
+                    distance = 0;
+                    sonarState = ready;
                 }
 
             }
             break;
 
-        case wait_30ms : // wait 30ms before new pulse
+        case waitForNewPulse : // wait 10ms before new pulse
             {
-                if (elapsed > 30000) {
+                if (elapsed > 10000) { // TODO: find minimum possible
                     sonarState = ready;
                 }
             }
@@ -136,13 +148,13 @@ inline void nonBlockingPing(void) {
     }
 }
 
-inline long us2cm(long microseconds) {
+inline float us2cm(float microseconds) {
     // The speed of sound is 340 m/s or 29 microseconds per centimeter.
-    return microseconds / 58; // twice 29 for round trip
+    return microseconds / 58.0; // twice 29 for round trip
 }
 
-inline long cm2us(long centimeters) {
+inline float cm2us(float centimeters) {
     // The speed of sound is 340 m/s or 29 microseconds per centimeter.
-    return centimeters * 58; // twice 29 for round trip
+    return centimeters * 58.0; // twice 29 for round trip
 }
 
