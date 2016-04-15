@@ -28,14 +28,14 @@ Q8n0 octave_start_note = 42;
 ///////////////////////////////////////////////////////////////////////////////
 const int trigPin = 22;
 const int echoPin = 23;
-const int maxDistance = 100.0; // cm
+const int maxDistance = 400.0; // cm
 float distance = 0.0;          // cm
 typedef enum state {
     ready, pulseStarted, pulseSent, waitForEchoEnd, waitForNewPulse
 } state_t;
 state_t sonarState = ready;
 
-#define DEBUG_PRINT 0 // 1 is normal, 2 is verbose
+#define DEBUG_PRINT 1 // 1 is normal, 2 is verbose
 ///////////////////////////////////////////////////////////////////////////////
 
 
@@ -59,7 +59,7 @@ inline float distMap(float near, float far) {
 
 
 void updateControl() {
-#if DEBUG_PRINT > 0
+#if 0 //DEBUG_PRINT > 0
     static int distOld = 0;
     if (distOld != int(distance)) {
         Serial.println(int(distance));
@@ -67,8 +67,8 @@ void updateControl() {
     }
 #endif
 
-    kNoteChangeDelay.set(distMap(70, 150));   // note duration ms, within resolution of CONTROL_RATE
-    aModDepth.setFreq(distMap(33, 0.3));      // vary mod depth to highlight am effects
+    kNoteChangeDelay.set(distMap(60, 300));   // note duration ms, within resolution of CONTROL_RATE
+    aModDepth.setFreq(distMap(6, 60));      // vary mod depth to highlight am effects
 
     //////////////////////////////////////////////////////////////////////
 
@@ -76,7 +76,7 @@ void updateControl() {
 
     if (kNoteChangeDelay.ready()) {
 
-        last_note = distMap(126, 3); // TODO Tune
+        last_note = distMap(127, 1); // TODO Tune
 
         // change step up or down a semitone occasionally
         if (rand((byte)3) == 0) {
@@ -88,7 +88,7 @@ void updateControl() {
 
         // sometimes add a fraction to the ratio
         if (rand((byte)5) == 0) {
-            ratio += rand((byte)255);
+            ratio += rand((byte)127);
         }
 
         // convert midi to frequency
@@ -158,8 +158,11 @@ inline void nonBlockingPing(void) {
     switch (sonarState) {
         case ready : // start triggering a pulse
             {
-                digitalWrite(trigPin, HIGH);
-                sonarState = pulseStarted;
+                if (0 == digitalRead(echoPin)) {
+                    trigTime = mozziMicros();
+                    digitalWrite(trigPin, HIGH);
+                    sonarState = pulseStarted;
+                }
             }
             break;
 
@@ -175,14 +178,7 @@ inline void nonBlockingPing(void) {
         case pulseSent : // start counting when echo raises
             {
                 if (1 == digitalRead(echoPin)) {
-                    trigTime = mozziMicros();
                     sonarState = waitForEchoEnd;
-                }
-
-                // did a time-out occur ?
-                if (elapsed > cm2us(maxDistance)) {
-                    // distance = 0;
-                    sonarState = ready;
                 }
             }
             break;
@@ -191,12 +187,13 @@ inline void nonBlockingPing(void) {
             {
                 if (0 == digitalRead(echoPin)) {
                     distance = us2cm(elapsed);
+                    Serial.print("0 400 ");
+                    Serial.println(distance);
                     sonarState = waitForNewPulse;
                 }
 
                 // did a time-out occur ?
-                if (elapsed > cm2us(maxDistance)) {
-                    // distance = 0;
+                if (elapsed > 120000) {
                     sonarState = ready;
                 }
 
@@ -205,7 +202,7 @@ inline void nonBlockingPing(void) {
 
         case waitForNewPulse : // wait before new pulse
             {
-                if (elapsed > 30000) { // TODO: find minimum possible
+                if (elapsed > 120000) { // TODO: find minimum possible
                     sonarState = ready;
                 }
             }
